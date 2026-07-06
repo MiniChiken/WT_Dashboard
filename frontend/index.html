@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WT Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="status">
+      <span id="conn-dot" class="dot"></span>
+      <span id="conn-label">Connecting...</span>
+    </div>
+    <div class="vehicle">
+      <span id="veh-army">-</span>
+      <span id="veh-type">-</span>
+    </div>
+    <div class="session">
+      <select id="session-select"></select>
+    </div>
+  </header>
+
+  <div id="air-warning-banner" class="air-warning">No air threats detected</div>
+
+  <main id="grid">
+    <section class="panel" id="panel-state">
+      <h2>Flight / Vehicle State</h2>
+      <div class="functions-list" id="functions-list"></div>
+    </section>
+
+    <!-- Instruments panel removed from the page per request (not enough useful
+         info in most vehicles to justify the space) but left in code below -
+         renderTiles(tiles-indicators, ...) still runs harmlessly against a
+         missing element, and the markup here just needs uncommenting to bring
+         it back:
+    <section class="panel" id="panel-indicators">
+      <h2>Instruments</h2>
+      <div class="tiles" id="tiles-indicators"></div>
+    </section>
+    -->
+
+    <!-- Minimap removed per request: its main value was enemy positions, and
+         WT's local API doesn't expose those in multiplayer (confirmed - absent
+         even at the exact moment enemies were visible in-game). Left in code -
+         renderMinimap/updateEnemyContactTracking/refreshTerrainImage all guard
+         against minimap-canvas being missing, so this just needs uncommenting:
+    <section class="panel" id="panel-minimap">
+      <h2>Minimap</h2>
+      <div class="minimap-wrap">
+        <canvas id="minimap-canvas"></canvas>
+      </div>
+    </section>
+    -->
+
+    <!-- Superseded by the Friendly/Enemy Roster panels below, which build a
+         full per-player roster (name, vehicle, alive/destroyed) from the kill
+         feed instead of just vehicle-type counts from map_obj. Left in code:
+    <section class="panel" id="panel-targets">
+      <h2>Enemy Roster (from kill feed)</h2>
+      <div class="targets-list" id="targets-list"></div>
+    </section>
+
+    <section class="panel" id="panel-friendlies">
+      <h2>Friendly Vehicles (from map)</h2>
+      <div class="tiles" id="tiles-friendlies"></div>
+    </section>
+    -->
+
+    <section class="panel" id="panel-roster-friendly">
+      <h2>
+        Friendly Roster
+        <span class="h2-actions">
+          <select class="roster-sort" id="roster-friendly-sort">
+            <option value="recent">Sort: Recent</option>
+            <option value="player">Sort: Player</option>
+            <option value="vehicle">Sort: Vehicle</option>
+          </select>
+          <span class="provisional-badge" id="roster-friendly-provisional" style="display:none">unconfirmed ID</span>
+          <span class="info-icon" tabindex="0">?
+            <span class="info-tooltip">Built entirely from the kill feed, not map positions - team is inferred by assuming standard WT team modes disable friendly fire, so every combat interaction is between opposing teams. Not exhaustive: only players who've been in a logged kill/damage message (directly or transitively connected back to you) appear here. Bold vehicle = currently in it · <span class="death-marker one">/</span> = one death in that vehicle · <span class="death-marker two">X</span> = two (vehicle exhausted for the match).</span>
+          </span>
+        </span>
+      </h2>
+      <div class="roster-list" id="roster-friendly-list"></div>
+    </section>
+
+    <section class="panel" id="panel-roster-enemy">
+      <h2>
+        Enemy Roster
+        <span class="h2-actions">
+          <select class="roster-sort" id="roster-enemy-sort">
+            <option value="recent">Sort: Recent</option>
+            <option value="player">Sort: Player</option>
+            <option value="vehicle">Sort: Vehicle</option>
+          </select>
+          <span class="provisional-badge" id="roster-enemy-provisional" style="display:none">unconfirmed ID</span>
+          <span class="info-icon" tabindex="0">?
+            <span class="info-tooltip">Built entirely from the kill feed, not map positions - team is inferred by assuming standard WT team modes disable friendly fire, so every combat interaction is between opposing teams. Not exhaustive: only players who've been in a logged kill/damage message (directly or transitively connected back to you) appear here. Bold vehicle = currently in it · <span class="death-marker one">/</span> = one death in that vehicle · <span class="death-marker two">X</span> = two (vehicle exhausted for the match).</span>
+          </span>
+        </span>
+      </h2>
+      <div class="roster-list" id="roster-enemy-list"></div>
+    </section>
+
+    <!-- Mission and Map Info removed per request. Left in code -
+         renderMission/renderMapObjSummary/renderTiles(tiles-mapinfo,...) all
+         guard against their elements being missing, so this just needs
+         uncommenting:
+    <section class="panel" id="panel-mission">
+      <h2>Mission</h2>
+      <div class="tiles" id="tiles-mission"></div>
+    </section>
+
+    <section class="panel" id="panel-mapinfo">
+      <h2>Map Info</h2>
+      <div class="tiles" id="tiles-mapinfo"></div>
+      <div class="tiles" id="tiles-mapobj-summary"></div>
+    </section>
+    -->
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

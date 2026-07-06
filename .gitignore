@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+backend/stats.db
+backend/stats.db-wal
+backend/stats.db-shm
+build/
+dist/
+*.spec
+.venv/
+venv/
