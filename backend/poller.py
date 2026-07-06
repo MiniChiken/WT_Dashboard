@@ -12,13 +12,20 @@ MAP_INTERVAL = 1.0
 HUDMSG_INTERVAL = 0.5
 MAP_IMAGE_INTERVAL = 5.0
 AIR_WARNING_TTL = 20.0  # seconds a "you're being engaged from the air" warning stays live
-# "who am I" resolution normally waits for a vehicle switch (or match end) to
-# close a vehicle's candidate window before trusting it - see
-# _maybe_resolve_my_name. This is a timeliness fallback for matches where the
-# player never switches: if enough time has passed in the same vehicle with
-# no ambiguity ever surfacing, go ahead and lock rather than staying
-# unresolved for the whole match.
-TENTATIVE_LOCK_DELAY = 90.0
+# Confirmed "who am I" resolution (self._my_name) ONLY finalizes on a vehicle
+# switch or match end - both are the only points where we've genuinely seen
+# every kill-feed mention of that vehicle for the match, so a second name
+# sharing it would already have been caught as ambiguous by then. A previous
+# version also tentative-locked after a wall-clock timeout in the same
+# vehicle with no ambiguity seen YET - that's unsound, not just slow: a
+# confirmed real match had another player also driving the exact same
+# vehicle (T-80UD) whose name reached the kill feed before the local
+# player's own name did, so the timer locked onto the WRONG name, and once
+# _my_name is set it never un-sets for the rest of the session. Real-time
+# features that need an identity before the match ends (air warnings) use
+# _provisional_my_name instead, which keeps re-evaluating and withdraws
+# itself the moment a vehicle turns out ambiguous - wrong-but-temporary
+# beats wrong-and-permanent.
 # map_info.valid is the reliable "actually in a match" signal (see is_valid
 # computation in run()) - but WT's local API doesn't clear map_obj on
 # returning to hangar, it just freezes the last match's object list forever
@@ -176,16 +183,6 @@ class TelemetryPoller:
             return
         self._provisional_my_name = None
 
-    def _maybe_tentative_lock(self):
-        if self._my_name is not None or not self._last_own_vehicle or self._session_start_wall is None:
-            return
-        norm = analysis.normalize_vehicle_id(self._last_own_vehicle)
-        started = self._own_vehicle_first_seen.get(norm) if norm else None
-        if norm and started is not None:
-            elapsed_in_vehicle = (time.time() - self._session_start_wall) - started
-            if elapsed_in_vehicle > TENTATIVE_LOCK_DELAY:
-                self._finalize_vehicle_candidates(norm)
-
     def _track_own_vehicle(self):
         current_type = self.latest.get("indicators", {}).get("type")
         if not current_type or current_type == self._last_own_vehicle or self._session_start_wall is None:
@@ -249,10 +246,19 @@ class TelemetryPoller:
         self._update_provisional_name()
 
     def _maybe_flag_air_warning(self, parsed: dict):
-        # Only fires once "my name" is resolved, since it's the one thing we
-        # CAN say for certain: whoever damages you is hostile, regardless of
-        # the broader (unreliable) team attribution problem elsewhere here.
-        if not self._my_name or parsed.get("target_name") != self._my_name:
+        # Needs SOME identity resolved to fire at all, since it's the one
+        # thing we CAN say for certain: whoever damages you is hostile,
+        # regardless of the broader (unreliable) team attribution problem
+        # elsewhere here. Falls back to the provisional name (see the comment
+        # above TENTATIVE_LOCK_DELAY's removal) rather than waiting for the
+        # confirmed one - a match can easily run its entire course on a
+        # single vehicle with no switch, and this needs to be useful DURING
+        # the match, not just confirmed after it ends. Worst case if the
+        # provisional guess is wrong: a warning misattributes who's engaging
+        # you for a few seconds until the guess self-corrects or withdraws -
+        # not silence for the whole match.
+        effective_name = self._my_name or self._provisional_my_name
+        if not effective_name or parsed.get("target_name") != effective_name:
             return
         actor_vehicle = parsed.get("actor_vehicle")
         if not analysis.is_air_vehicle(actor_vehicle, self._known_armies):
@@ -346,7 +352,6 @@ class TelemetryPoller:
                     self.latest["indicators"] = indicators or {}
                     if is_valid:
                         self._track_own_vehicle()
-                        self._maybe_tentative_lock()
                 else:
                     was_valid = False
                     self._match_invalid_since = None
