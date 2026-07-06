@@ -2,8 +2,75 @@ import json
 import math
 import re
 from collections import defaultdict, deque
+from pathlib import Path
 
 import db
+
+# Shared with the frontend's premium-highlight/wiki-link matching (see
+# vehicleIndex in frontend/app.js) - one dataset, refreshed by
+# scripts/update_vehicles.py, used by both sides for their own purpose.
+_VEHICLES_JSON_PATH = Path(__file__).parent.parent / "frontend" / "vehicles.json"
+_AIR_VEHICLE_TYPES = {"fighter", "bomber", "assault", "attack_helicopter", "utility_helicopter"}
+# Some ids in the dataset use full nation words ("ussr_t_80ud"), others use
+# abbreviated ones ("germ_", "cn_", "fr_", "sw_", "it_", "jp_", "il_") - a
+# different (and inconsistent) convention from WT's own live telemetry
+# (always full words, e.g. indicators.army). Both are handled here since this
+# lookup is built from the dataset's ids, not from telemetry.
+_VEHICLE_ID_NATION_PREFIXES = {
+    "ussr", "usa", "us", "germ", "germany", "uk", "britain", "fr", "france",
+    "it", "italy", "jp", "japan", "cn", "china", "sw", "sweden", "il", "israel",
+}
+_known_aircraft_keys = None
+
+
+def _normalize_dataset_id(raw):
+    parts = [p for p in (raw or "").split("_") if p]
+    if len(parts) > 1 and parts[0].lower() in _VEHICLE_ID_NATION_PREFIXES:
+        parts = parts[1:]
+    return re.sub(r"[^A-Za-z0-9]", "", "".join(parts)).upper()
+
+
+def _load_known_aircraft_keys():
+    # Lazy + cached: read once per process, not once per message. If the
+    # dataset is missing or unreadable, this quietly degrades to "no extra
+    # coverage" rather than breaking message parsing.
+    global _known_aircraft_keys
+    if _known_aircraft_keys is not None:
+        return _known_aircraft_keys
+    try:
+        data = json.loads(_VEHICLES_JSON_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _known_aircraft_keys = []
+        return _known_aircraft_keys
+    keys = set()
+    for v in data:
+        if v.get("type") in _AIR_VEHICLE_TYPES:
+            norm = _normalize_dataset_id(v.get("id"))
+            if len(norm) >= 3:
+                keys.add(norm)
+    _known_aircraft_keys = sorted(keys)
+    return _known_aircraft_keys
+
+
+def is_known_aircraft_name(vehicle_name):
+    """Checks a kill-feed display name against every fighter/bomber/assault/
+    attack_helicopter/utility_helicopter in the vehicles.json dataset (3000+
+    vehicles) - the same substring-matching approach used by the frontend's
+    wiki-link lookup, since the dataset only has WT's internal ids, not the
+    display text the kill feed actually uses (see frontend/app.js's
+    vehicleCandidates for the full reasoning). This is what actually makes
+    fixed-wing detection viable: confirmed live, a real air kill (an A-7E
+    against the local player) was missed entirely because the old fallback
+    only recognized planes the local player had personally flown before -
+    zero coverage for anything else. This dataset-backed check alone matches
+    1400+ aircraft/helicopters regardless of what the player has flown."""
+    norm = normalize_vehicle_name(vehicle_name)
+    if len(norm) < 3:
+        return False
+    for key in _load_known_aircraft_keys():
+        if norm == key or norm in key or key in norm:
+            return True
+    return False
 
 # Mirrors the verb list in frontend/app.js's COMBAT_VERB_PATTERN - kept in sync by
 # hand since WT's exact vocabulary of hit-log verbs isn't documented.
@@ -149,12 +216,16 @@ def normalize_vehicle_id(type_str):
 def is_air_vehicle(vehicle_name, known_armies=None):
     """Best-effort "is this named vehicle an aircraft, helicopter, or drone"
     check for warning purposes. Helicopters and drones/UCAVs are matched
-    reliably via name keywords; fixed-wing aircraft are far too numerous to
-    keyword-match completely, so those are only caught if the player has
-    personally flown a vehicle whose normalized name matches (known_armies,
-    built from our own session history) - real but incomplete coverage that
-    improves the more is flown."""
+    reliably via name keywords; fixed-wing aircraft are checked against the
+    vehicles.json dataset (see is_known_aircraft_name) - real, broad coverage
+    (1400+ aircraft/helicopters) that isn't limited to what the local player
+    has personally flown. known_armies (built from the player's own session
+    history) is kept as a fallback for anything the dataset doesn't have or
+    that's since gone stale - cheap extra coverage, not the primary path
+    anymore."""
     if is_helicopter_name(vehicle_name) or is_drone_name(vehicle_name):
+        return True
+    if is_known_aircraft_name(vehicle_name):
         return True
     if not known_armies:
         return False
