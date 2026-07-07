@@ -12,6 +12,11 @@ MAP_INTERVAL = 1.0
 HUDMSG_INTERVAL = 0.5
 MAP_IMAGE_INTERVAL = 5.0
 AIR_WARNING_TTL = 20.0  # seconds a "you're being engaged from the air" warning stays live
+# After switching vehicles (which, mid-match, almost always means we just died
+# and respawned), keep matching air attacks against the vehicle we just left
+# for this long - a fatal air kill's kill-feed message names the vehicle we
+# died in but arrives after our telemetry already flipped to the new vehicle.
+RESPAWN_MATCH_WINDOW = 15.0
 # Confirmed "who am I" resolution (self._my_name) ONLY finalizes on a vehicle
 # switch or match end - both are the only points where we've genuinely seen
 # every kill-feed mention of that vehicle for the match, so a second name
@@ -95,6 +100,15 @@ class TelemetryPoller:
         self._own_vehicle_intervals: dict[str, list[list[float | None]]] = {}
         self._last_own_vehicle: str | None = None
         self._current_own_norm: str | None = None
+        # The vehicle we were in immediately before the current one, and the
+        # wall-clock time we switched. Used by the air warning: a fatal air
+        # hit's kill-feed message names the vehicle we DIED in, but by the time
+        # it arrives our telemetry already shows us respawned into the next
+        # vehicle - so matching only the current vehicle would miss every fatal
+        # air kill (confirmed against real data). Matching the just-previous
+        # vehicle for a short window after a switch closes that gap.
+        self._prev_own_norm: str | None = None
+        self._prev_own_switch_wall: float | None = None
         # Per-vehicle candidate pool for "who am I" resolution - see
         # _maybe_resolve_my_name for why this replaced a simpler first-match approach.
         self._vehicle_candidates: dict[str, set[str]] = {}
@@ -152,6 +166,8 @@ class TelemetryPoller:
             self._own_vehicle_intervals = {}
             self._last_own_vehicle = None
             self._current_own_norm = None
+            self._prev_own_norm = None
+            self._prev_own_switch_wall = None
             self._vehicle_candidates = {}
             self._ambiguous_vehicles = set()
         elif was_valid and not is_valid and self._session_id is not None:
@@ -228,12 +244,16 @@ class TelemetryPoller:
         if not current_type or current_type == self._last_own_vehicle or self._session_start_wall is None:
             return
         now_rel = time.time() - self._session_start_wall
-        # Close out the interval for the vehicle we're leaving.
+        # Close out the interval for the vehicle we're leaving, and remember it
+        # as the previous vehicle (with the switch time) for air-warning
+        # respawn matching.
         if self._current_own_norm:
             intervals = self._own_vehicle_intervals.get(self._current_own_norm)
             if intervals and intervals[-1][1] is None:
                 intervals[-1][1] = now_rel
             self._finalize_vehicle_candidates(self._current_own_norm)
+            self._prev_own_norm = self._current_own_norm
+            self._prev_own_switch_wall = time.time()
         self._last_own_vehicle = current_type
         norm = analysis.normalize_vehicle_id(current_type)
         self._current_own_norm = norm
@@ -298,22 +318,48 @@ class TelemetryPoller:
         self._update_provisional_name()
 
     def _maybe_flag_air_warning(self, parsed: dict):
-        # Needs SOME identity resolved to fire at all, since it's the one
-        # thing we CAN say for certain: whoever damages you is hostile,
-        # regardless of the broader (unreliable) team attribution problem
-        # elsewhere here. Falls back to the provisional name (see the comment
-        # above TENTATIVE_LOCK_DELAY's removal) rather than waiting for the
-        # confirmed one - a match can easily run its entire course on a
-        # single vehicle with no switch, and this needs to be useful DURING
-        # the match, not just confirmed after it ends. Worst case if the
-        # provisional guess is wrong: a warning misattributes who's engaging
-        # you for a few seconds until the guess self-corrects or withdraws -
-        # not silence for the whole match.
-        effective_name = self._my_name or self._provisional_my_name
-        if not effective_name or parsed.get("target_name") != effective_name:
-            return
+        # Fires when an aircraft/helicopter/drone attacks US. Deliberately does
+        # NOT depend on resolving our player NAME: name resolution fails
+        # exactly in the cases that matter here (a shared vehicle where we
+        # never appear in the feed resolves to a teammate, or to nobody), which
+        # left this silent through whole matches where planes were killing us.
+        #
+        # Instead we key off our VEHICLE, which telemetry always tells us for
+        # certain. An air attack counts as "on us" if its target vehicle
+        # matches the one we're in now, or the one we were in moments ago (a
+        # fatal hit's message names the vehicle we died in but lands just after
+        # we've respawned - see RESPAWN_MATCH_WINDOW). A confidently-resolved
+        # name still counts too, as a belt-and-suspenders path.
+        #
+        # Tradeoff: if a same-vehicle teammate is air-attacked we may warn when
+        # it wasn't strictly us. For a "check the sky" threat cue that's a fine
+        # price - a spurious glance costs nothing, a missed warning can cost the
+        # vehicle - and it's a far better failure mode than the total silence
+        # the name-only version produced.
         actor_vehicle = parsed.get("actor_vehicle")
         if not analysis.is_air_vehicle(actor_vehicle, self._known_armies):
+            return
+
+        target_name = parsed.get("target_name")
+        target_vehicle = parsed.get("target_vehicle")
+
+        effective_name = self._my_name or self._provisional_my_name
+        name_match = bool(effective_name and target_name == effective_name)
+
+        veh_match = False
+        if target_vehicle:
+            tnorm = analysis.normalize_vehicle_name(target_vehicle)
+            if tnorm and tnorm == self._current_own_norm:
+                veh_match = True
+            elif (
+                tnorm
+                and tnorm == self._prev_own_norm
+                and self._prev_own_switch_wall is not None
+                and time.time() - self._prev_own_switch_wall < RESPAWN_MATCH_WINDOW
+            ):
+                veh_match = True
+
+        if not (name_match or veh_match):
             return
         self._air_warning = {
             "attacker_name": parsed.get("actor_name"),
