@@ -37,6 +37,16 @@ AIR_WARNING_TTL = 20.0  # seconds a "you're being engaged from the air" warning 
 # long before ending the match, in case it ever blips false for a single
 # poll mid-match without an actual hangar return.
 MATCH_END_DEBOUNCE = 3.0
+# "who am I" resolution only trusts a kill-feed mention of one of our vehicles
+# if it happened while we were ACTUALLY in that vehicle (see
+# _maybe_resolve_my_name). Kill-feed match_time (game clock, integer seconds)
+# and our own occupancy windows (wall-clock relative to session start) line up
+# closely in normal play but not exactly - sampling is ~1-2s and a match that
+# we joined at its very start keeps the two clocks within a few seconds. This
+# slack absorbs that drift at the window edges. Validated offline against real
+# sessions: with this slack every session resolved to the correct player and
+# none to a same-vehicle teammate.
+OWN_WINDOW_SLACK = 8.0
 
 
 class TelemetryPoller:
@@ -75,8 +85,16 @@ class TelemetryPoller:
         self._match_invalid_since: float | None = None
         self._known_armies: dict = {}
         self._session_start_wall: float | None = None
-        self._own_vehicle_first_seen: dict[str, float] = {}
+        # Per normalized-vehicle-id, the list of [start, end] time windows (in
+        # seconds relative to session start) during which WE personally drove
+        # it - a vehicle re-entered later gets a second interval. The current
+        # vehicle's newest interval stays open (end = None) until we switch
+        # away. Used to time-gate "who am I" candidates: a kill-feed mention of
+        # one of our vehicles only counts as possibly-us if it happened while
+        # we were actually in it (see _maybe_resolve_my_name).
+        self._own_vehicle_intervals: dict[str, list[list[float | None]]] = {}
         self._last_own_vehicle: str | None = None
+        self._current_own_norm: str | None = None
         # Per-vehicle candidate pool for "who am I" resolution - see
         # _maybe_resolve_my_name for why this replaced a simpler first-match approach.
         self._vehicle_candidates: dict[str, set[str]] = {}
@@ -131,8 +149,9 @@ class TelemetryPoller:
             self._air_warning = None
             self._known_armies = db.get_known_vehicle_armies()
             self._session_start_wall = time.time()
-            self._own_vehicle_first_seen = {}
+            self._own_vehicle_intervals = {}
             self._last_own_vehicle = None
+            self._current_own_norm = None
             self._vehicle_candidates = {}
             self._ambiguous_vehicles = set()
         elif was_valid and not is_valid and self._session_id is not None:
@@ -140,10 +159,8 @@ class TelemetryPoller:
             # (so _track_own_vehicle's move-away trigger never fired) - close
             # out whatever vehicle we were last in using whatever candidates
             # were collected for it.
-            if self._last_own_vehicle:
-                norm = analysis.normalize_vehicle_id(self._last_own_vehicle)
-                if norm:
-                    self._finalize_vehicle_candidates(norm)
+            if self._current_own_norm:
+                self._finalize_vehicle_candidates(self._current_own_norm)
             db.end_session(self._session_id)
             self._session_id = None
 
@@ -172,7 +189,15 @@ class TelemetryPoller:
         # a singleton bucket ambiguous, the guess is withdrawn (roster falls
         # back to empty for that name rather than keep showing a guess a
         # collision just proved wrong).
-        for norm, candidates in self._vehicle_candidates.items():
+        # Prefer the current vehicle's candidate - with time-gating every clean
+        # candidate should be the same name (us), but if the player just
+        # switched vehicles the current one is the freshest, most relevant read.
+        norms = list(self._vehicle_candidates.keys())
+        if self._current_own_norm in self._vehicle_candidates:
+            norms.remove(self._current_own_norm)
+            norms.insert(0, self._current_own_norm)
+        for norm in norms:
+            candidates = self._vehicle_candidates.get(norm, set())
             if norm in self._ambiguous_vehicles or len(candidates) != 1:
                 continue
             name = next(iter(candidates))
@@ -183,18 +208,39 @@ class TelemetryPoller:
             return
         self._provisional_my_name = None
 
+    def _in_own_window(self, norm: str, match_time: float | None) -> bool:
+        # Was the player actually driving `norm` at kill-feed `match_time`?
+        # The current vehicle's interval is left open (end None) so anything
+        # from when we entered it up to now counts. match_time None can't be
+        # placed on the timeline, so it never counts (safer to skip than to
+        # guess).
+        if match_time is None:
+            return False
+        for start, end in self._own_vehicle_intervals.get(norm, ()):
+            lo = start - OWN_WINDOW_SLACK
+            hi = (end if end is not None else float("inf")) + OWN_WINDOW_SLACK
+            if lo <= match_time <= hi:
+                return True
+        return False
+
     def _track_own_vehicle(self):
         current_type = self.latest.get("indicators", {}).get("type")
         if not current_type or current_type == self._last_own_vehicle or self._session_start_wall is None:
             return
-        if self._last_own_vehicle:
-            prev_norm = analysis.normalize_vehicle_id(self._last_own_vehicle)
-            if prev_norm:
-                self._finalize_vehicle_candidates(prev_norm)
+        now_rel = time.time() - self._session_start_wall
+        # Close out the interval for the vehicle we're leaving.
+        if self._current_own_norm:
+            intervals = self._own_vehicle_intervals.get(self._current_own_norm)
+            if intervals and intervals[-1][1] is None:
+                intervals[-1][1] = now_rel
+            self._finalize_vehicle_candidates(self._current_own_norm)
         self._last_own_vehicle = current_type
         norm = analysis.normalize_vehicle_id(current_type)
-        if norm and norm not in self._own_vehicle_first_seen:
-            self._own_vehicle_first_seen[norm] = time.time() - self._session_start_wall
+        self._current_own_norm = norm
+        if norm:
+            # Open a fresh interval for the vehicle we're entering (a re-entry
+            # gets its own interval rather than reopening the old one).
+            self._own_vehicle_intervals.setdefault(norm, []).append([now_rel, None])
 
     def _maybe_resolve_my_name(self, parsed: dict, match_time: float | None):
         # We have no reliable "who am I" signal from the API (sender is always
@@ -229,7 +275,13 @@ class TelemetryPoller:
             if not name or not vehicle:
                 continue
             norm = analysis.normalize_vehicle_name(vehicle)
-            if norm not in self._own_vehicle_first_seen or norm in self._ambiguous_vehicles:
+            # Time-gate: only trust this as possibly-us if the mention happened
+            # while we were actually in that vehicle. Without this, a teammate
+            # driving a vehicle type we used EARLIER (but had already switched
+            # away from) polluted the candidate pool - confirmed live, that
+            # picked a teammate's name as the roster identity while our own
+            # (correct, in-window) mention sat unused.
+            if norm in self._ambiguous_vehicles or not self._in_own_window(norm, match_time):
                 continue
             bucket = self._vehicle_candidates.setdefault(norm, set())
             bucket.add(name)
