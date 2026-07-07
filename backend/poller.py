@@ -17,6 +17,18 @@ AIR_WARNING_TTL = 20.0  # seconds a "you're being engaged from the air" warning 
 # for this long - a fatal air kill's kill-feed message names the vehicle we
 # died in but arrives after our telemetry already flipped to the new vehicle.
 RESPAWN_MATCH_WINDOW = 15.0
+# How far apart (wall seconds) a kill-feed death message and our own telemetry
+# respawn can be and still be treated as the same death, for death-correlation
+# identity resolution. Generous because you can sit dead for a while before
+# picking your next vehicle - the message fires at death, the telemetry switch
+# only at respawn. Validated offline: this width resolved the right player in
+# every death case and never a same-vehicle teammate.
+DEATH_CORRELATION_WINDOW = 30.0
+# Wait this long (wall seconds) after detecting our death before deciding who
+# it was, so near-simultaneous same-vehicle deaths (e.g. one bomb catching two
+# of the same tank) are all collected first and correctly seen as ambiguous
+# rather than the first-arriving one being locked in prematurely.
+DEATH_SETTLE_DELAY = 3.0
 # Confirmed "who am I" resolution (self._my_name) ONLY finalizes on a vehicle
 # switch or match end - both are the only points where we've genuinely seen
 # every kill-feed mention of that vehicle for the match, so a second name
@@ -113,6 +125,15 @@ class TelemetryPoller:
         # _maybe_resolve_my_name for why this replaced a simpler first-match approach.
         self._vehicle_candidates: dict[str, set[str]] = {}
         self._ambiguous_vehicles: set[str] = set()
+        # Death-correlation: the highest-confidence "who am I" signal. When our
+        # telemetry shows we died (vehicle switched mid-match = we respawned),
+        # the kill-feed's destroyed-message that names the vehicle we died in
+        # names US - anchored to our ACTUAL death, not just "someone in our
+        # vehicle type." _recent_lethal buffers recent lethal messages (wall
+        # time, victim name, victim vehicle norm); _pending_deaths records
+        # deaths awaiting a matching message. See _correlate_deaths.
+        self._recent_lethal: list[tuple[float, str, str]] = []
+        self._pending_deaths: list[list] = []  # [switch_wall, norm, resolved]
 
     def subscribe(self) -> asyncio.Queue:
         q = asyncio.Queue(maxsize=1)
@@ -170,6 +191,8 @@ class TelemetryPoller:
             self._prev_own_switch_wall = None
             self._vehicle_candidates = {}
             self._ambiguous_vehicles = set()
+            self._recent_lethal = []
+            self._pending_deaths = []
         elif was_valid and not is_valid and self._session_id is not None:
             # Fallback for a match that ends before we ever switched vehicles
             # (so _track_own_vehicle's move-away trigger never fired) - close
@@ -180,20 +203,100 @@ class TelemetryPoller:
             db.end_session(self._session_id)
             self._session_id = None
 
+    def _confirm_my_name(self, name: str):
+        # Lock the confirmed identity and persist it. Also overrides a
+        # provisional guess (which may have been a same-vehicle teammate) so
+        # the roster corrects immediately.
+        if not name or self._my_name == name:
+            return
+        self._my_name = name
+        self._provisional_my_name = name
+        if self._session_id is not None:
+            db.set_session_my_name(self._session_id, name)
+            db.set_session_provisional_my_name(self._session_id, name)
+
+    def _record_lethal(self, parsed: dict):
+        # Buffer a lethal kill-feed message's victim (name + vehicle) for
+        # death-correlation, then see if it completes a pending death.
+        name = parsed.get("target_name")
+        vehicle = parsed.get("target_vehicle")
+        if not name or not vehicle:
+            return
+        norm = analysis.normalize_vehicle_name(vehicle)
+        if not norm:
+            return
+        now = time.time()
+        self._recent_lethal.append((now, name, norm))
+        # Prune anything too old to still match a pending death.
+        cutoff = now - DEATH_CORRELATION_WINDOW - 5.0
+        self._recent_lethal = [e for e in self._recent_lethal if e[0] >= cutoff]
+        self._correlate_deaths()
+
+    def _note_own_death(self, norm: str):
+        # Called when telemetry shows we left a real vehicle mid-match (a
+        # respawn, i.e. we died in `norm`). Record it and try to correlate
+        # against lethal messages already seen (the death message often arrives
+        # just before the respawn switch). "DUMMYPLANE" is the spawn-select
+        # placeholder, not a real vehicle we could have died in - skip it.
+        if not norm or norm == "DUMMYPLANE":
+            return
+        self._pending_deaths.append([time.time(), norm, False])
+        self._correlate_deaths()
+
+    def _correlate_deaths(self):
+        # A pending death resolves when EXACTLY one distinct victim name appears
+        # in the lethal buffer for the vehicle we died in, within the time
+        # window. That name is us. Uniqueness is required so a same-vehicle
+        # teammate dying near the same moment can't produce a false lock (it
+        # just leaves the death unresolved). Higher confidence than the
+        # candidate-pool path, so it's allowed to override.
+        #
+        # Called both when messages/deaths arrive AND every poll tick, so a
+        # death still settles even if no further messages come in. A death is
+        # only decided once DEATH_SETTLE_DELAY has passed since we detected it,
+        # so all near-simultaneous same-vehicle deaths are in hand before we
+        # judge uniqueness (otherwise the first-arriving name would lock in
+        # before a second could reveal the ambiguity).
+        if self._my_name is not None:
+            self._pending_deaths = [d for d in self._pending_deaths if not d[2]]
+            return
+        now = time.time()
+        for death in self._pending_deaths:
+            switch_wall, norm, resolved = death
+            if resolved or now - switch_wall < DEATH_SETTLE_DELAY:
+                continue
+            names = {
+                nm for (w, nm, vn) in self._recent_lethal
+                if vn == norm and abs(w - switch_wall) <= DEATH_CORRELATION_WINDOW
+            }
+            if not names:
+                # Nothing matched yet - keep waiting (our death message may
+                # still arrive) until the death ages out of the window below.
+                continue
+            death[2] = True  # decided (whether or not it was unique)
+            if len(names) == 1:
+                self._confirm_my_name(next(iter(names)))
+                break
+        # Drop decided deaths and ones too old to ever collect a match.
+        oldest_ok = now - DEATH_CORRELATION_WINDOW - 5.0
+        self._pending_deaths = [
+            d for d in self._pending_deaths if not d[2] and d[0] >= oldest_ok
+        ]
+
     def _finalize_vehicle_candidates(self, norm: str):
         # Called once we're confident we've seen every kill-feed mention of a
         # vehicle we personally drove (i.e. we've since moved on to a
         # different one, closing that vehicle's observation window). Only
         # resolves if EXACTLY one distinct name ever showed up driving it -
         # if a second name appeared before this point, _maybe_resolve_my_name
-        # already flagged it ambiguous and it's permanently unusable.
+        # already flagged it ambiguous and it's permanently unusable. This is
+        # the LOWER-confidence fallback: death-correlation (_correlate_deaths)
+        # runs first on a switch and wins when it can.
         if self._my_name is not None or norm in self._ambiguous_vehicles:
             return
         candidates = self._vehicle_candidates.get(norm)
         if candidates and len(candidates) == 1:
-            self._my_name = next(iter(candidates))
-            if self._session_id is not None:
-                db.set_session_my_name(self._session_id, self._my_name)
+            self._confirm_my_name(next(iter(candidates)))
 
     def _update_provisional_name(self):
         # Best current guess at "who am I", refreshed on every candidate-pool
@@ -251,6 +354,11 @@ class TelemetryPoller:
             intervals = self._own_vehicle_intervals.get(self._current_own_norm)
             if intervals and intervals[-1][1] is None:
                 intervals[-1][1] = now_rel
+            # Leaving a real vehicle mid-match is a respawn (we died in it).
+            # Death-correlation gets first crack at confirming our name (it's
+            # higher confidence); the candidate-pool fallback only fires if
+            # that couldn't resolve.
+            self._note_own_death(self._current_own_norm)
             self._finalize_vehicle_candidates(self._current_own_norm)
             self._prev_own_norm = self._current_own_norm
             self._prev_own_switch_wall = time.time()
@@ -394,6 +502,8 @@ class TelemetryPoller:
             if self._session_id is not None:
                 parsed = analysis.parse_combat_message(dmg.get("msg")) or {}
                 self._maybe_resolve_my_name(parsed, dmg.get("time"))
+                if analysis.is_lethal(parsed.get("verb")):
+                    self._record_lethal(parsed)
                 self._maybe_flag_air_warning(parsed)
                 db.log_event(
                     self._session_id, "damage", dmg,
@@ -450,6 +560,10 @@ class TelemetryPoller:
                     self.latest["indicators"] = indicators or {}
                     if is_valid:
                         self._track_own_vehicle()
+                        # Settle any pending death-correlation even when no new
+                        # kill-feed messages are arriving to trigger it.
+                        if self._my_name is None and self._pending_deaths:
+                            self._correlate_deaths()
                 else:
                     was_valid = False
                     self._match_invalid_since = None
