@@ -1,0 +1,19 @@
+{
+  "repository": "https://github.com/gszabi99/War-Thunder-Datamine",
+  "commit": "ecbd610ff9aa0248bee3095db0cf28bde9ea5aee",
+  "game_version": "2.61.0.17",
+  "language": "English",
+  "label_suffix": "_1",
+  "sources": {
+    "lang.vromfs.bin_u/lang/units.csv": "d6817d1782d9eaf048af785f5f9d342ec2fcdb7202f06dc000bae0d856f32c56",
+    "char.vromfs.bin_u/config/wpcost.blkx": "358adc47d144809cd6de34700b415f7ed6148d315c5406bda284b569bccd6379"
+  },
+  "catalog_vehicle_count": 3424,
+  "mapped_vehicle_count": 3420,
+  "missing_short_names": [
+    "f_105d_japan_killstreak",
+    "saab_ajs37_early",
+    "us_m551_football",
+    "ussr_m551_football"
+  ]
+}

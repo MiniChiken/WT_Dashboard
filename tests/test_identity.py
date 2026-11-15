@@ -75,6 +75,38 @@ class VehicleIdentityTests(unittest.TestCase):
         self.assertIsNone(db.get_session_my_name(self.tracker._session_id))
         self.assertIsNone(db.get_session_provisional_my_name(self.tracker._session_id))
 
+    def test_each_nation_can_resolve_local_player(self):
+        for unit_id, name in (
+            ("us_m4a1_1942_sherman", "M4A1"),
+            ("ussr_bt_5", "BT-5"),
+            ("germ_jaguar_2", "Jaguar 2"),
+            ("uk_a_13_mk1", "A13 Mk I"),
+            ("jp_type_75", "Type 75 SPH"),
+            ("cn_bt_5", "BT-5"),
+            ("it_m15_42", "M15/42"),
+            ("fr_b1_ter", "B1 ter"),
+            ("sw_strv_m31", "Strv m/31"),
+            ("il_magach_6b_gal_batash", "Gal Batash"),
+        ):
+            with self.subTest(unit_id=unit_id):
+                self.tracker = TelemetryPoller()
+                with patch("poller.time.time", return_value=1000):
+                    self.tracker._handle_match_transition(False, True, {"army": "tank", "type": "dummy_plane"})
+                self.vehicle(2, f"tankModels/{unit_id}")
+                self.event(10, "local player", name)
+                self.vehicle(20, "unlisted_replacement_vehicle")
+                self.assertEqual(db.get_session_my_name(self.tracker._session_id), "local player")
+
+    def test_imported_vehicle_still_requires_an_unambiguous_player(self):
+        # Chinese and Soviet BT-5s share a short label. Matching a localized
+        # name must not bypass the existing same-vehicle ambiguity checks.
+        self.vehicle(2, "tankModels/cn_bt_5")
+        self.event(10, "teammate", "BT-5")
+        self.event(12, "local player", "BT-5")
+        self.vehicle(20, "tankModels/ussr_bt_5")
+        self.assertIsNone(db.get_session_my_name(self.tracker._session_id))
+        self.assertIsNone(db.get_session_provisional_my_name(self.tracker._session_id))
+
 
 if __name__ == "__main__":
     unittest.main()

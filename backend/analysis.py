@@ -105,8 +105,9 @@ CRASHED_RE = re.compile(r"\bcrashed\b", re.IGNORECASE)
 
 NATION_CODES = _VEHICLE_ID_NATION_PREFIXES
 
-# Exact internal-ID/display-name pairs, also used by the frontend. Some
-# vehicles cannot be matched by removing punctuation and nation prefixes.
+# Offline English combat-log labels, also used by the frontend. Generated
+# from the datamine's localization and vehicle catalog; see the metadata and
+# scripts/update_vehicle_names.py. Unknown IDs retain generic normalization.
 try:
     VEHICLE_NAMES = json.loads(
         (_VEHICLES_JSON_PATH.parent / "vehicle_names.json").read_text(encoding="utf-8")
