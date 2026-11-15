@@ -273,11 +273,21 @@ function renderTiles(container, obj, keyCache) {
 // category path prefix, drop a leading nation code, then split remaining segments
 // on letter/digit boundaries so "80ud" becomes "80 UD" - turns raw IDs into
 // reasonably readable names ("T 80 UD", "KA 50") without a per-vehicle lookup table.
-const NATION_CODES = new Set(["ussr", "us", "usa", "germany", "britain", "uk", "japan", "china", "italy", "france", "sweden", "israel"]);
+const NATION_CODES = new Set(["ussr", "us", "usa", "germ", "germany", "britain", "uk", "jp", "japan", "cn", "china", "it", "italy", "fr", "france", "sw", "sweden", "il", "israel"]);
+let vehicleNames = {};
+
+fetch("/static/vehicle_names.json")
+  .then((response) => response.json())
+  .then((names) => {
+    vehicleNames = names;
+    return refreshHistory();
+  })
+  .catch(() => {});
 
 function fmtVehicleName(type) {
   if (!type) return "-";
   const afterSlash = type.includes("/") ? type.slice(type.lastIndexOf("/") + 1) : type;
+  if (vehicleNames[afterSlash]) return vehicleNames[afterSlash];
   let parts = afterSlash.split("_").filter(Boolean);
   if (parts.length > 1 && NATION_CODES.has(parts[0].toLowerCase())) {
     parts = parts.slice(1);

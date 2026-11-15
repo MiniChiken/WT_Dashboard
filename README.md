@@ -30,6 +30,33 @@ python -m uvicorn main:app --app-dir backend --port 8765
 
 Then open `http://localhost:8765`.
 
+Battle titles use the first real vehicle selected, ignoring the spawn-screen
+`dummy_plane`. The offline English ID/name snapshot in
+`frontend/vehicle_names.json` supports readable titles and player identification
+from the combat log across all ten nations. Unknown IDs use nation-prefix and
+punctuation normalization; identity remains unresolved when the recorded
+evidence is ambiguous, including players in vehicles sharing the same name.
+
+The snapshot is generated from the English short (`_1`) labels in
+[War-Thunder-Datamine's units.csv](https://github.com/gszabi99/War-Thunder-Datamine/blob/master/lang.vromfs.bin_u/lang/units.csv),
+restricted to vehicles in its `wpcost.blkx` catalog. Full/shop names are not
+substituted for missing combat-log labels. `frontend/vehicle_names.meta.json`
+records the source commit, game version, checksums, coverage, and missing IDs.
+No external requests are needed while the dashboard runs.
+
+To refresh the snapshot, or reproduce it from the commit in the metadata:
+
+```sh
+python scripts/update_vehicle_names.py
+python scripts/update_vehicle_names.py --ref COMMIT_FROM_METADATA
+```
+
+To run the regression tests from the repository root:
+
+```sh
+PYTHONPATH=backend python -m unittest discover -s tests -v
+```
+
 ## Building the exe yourself
 
 ```

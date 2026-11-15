@@ -129,6 +129,17 @@ def end_session(session_id: int):
     conn.close()
 
 
+def set_session_vehicle(session_id: int, army: str, vehicle_type: str):
+    """Record the first real vehicle once the player leaves spawn selection."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE sessions SET army = ?, vehicle_type = ? WHERE id = ?",
+        (army, vehicle_type, session_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def log_event(session_id: int, kind: str, raw: dict, msg: str = None, match_time: float = None,
               is_enemy: bool = None, verb: str = None, actor_name: str = None,
               actor_vehicle: str = None, target_name: str = None, target_vehicle: str = None):
@@ -158,7 +169,7 @@ def get_session_my_name(session_id: int):
     return row["my_name"] if row else None
 
 
-def set_session_provisional_my_name(session_id: int, name: str):
+def set_session_provisional_my_name(session_id: int, name: Optional[str]):
     conn = get_conn()
     conn.execute("UPDATE sessions SET provisional_my_name = ? WHERE id = ?", (name, session_id))
     conn.commit()

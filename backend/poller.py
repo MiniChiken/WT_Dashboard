@@ -80,6 +80,7 @@ class TelemetryPoller:
         }
         self.subscribers: set[asyncio.Queue] = set()
         self._session_id: int | None = None
+        self._session_vehicle_set = False
         self._last_evt = 0
         self._last_dmg = 0
         self._my_name: str | None = None
@@ -175,8 +176,10 @@ class TelemetryPoller:
         # doing so previously caused old, already-seen kills to be replayed into new
         # sessions. The cursor only advances forward, across session boundaries.
         if is_valid and not was_valid:
+            self._session_vehicle_set = analysis.is_real_vehicle(indicators.get("type"))
             self._session_id = db.start_session(
-                indicators.get("army"), indicators.get("type"),
+                indicators.get("army") if self._session_vehicle_set else None,
+                indicators.get("type") if self._session_vehicle_set else None,
                 map_image=self.map_image, map_image_type=self.map_image_type,
             )
             self._my_name = None
@@ -325,7 +328,10 @@ class TelemetryPoller:
                 if self._session_id is not None:
                     db.set_session_provisional_my_name(self._session_id, name)
             return
-        self._provisional_my_name = None
+        if self._provisional_my_name is not None:
+            self._provisional_my_name = None
+            if self._session_id is not None:
+                db.set_session_provisional_my_name(self._session_id, None)
 
     def _in_own_window(self, norm: str, match_time: float | None) -> bool:
         # Was the player actually driving `norm` at kill-feed `match_time`?
@@ -347,6 +353,12 @@ class TelemetryPoller:
         if not current_type or current_type == self._last_own_vehicle or self._session_start_wall is None:
             return
         now_rel = time.time() - self._session_start_wall
+        if not self._session_vehicle_set and analysis.is_real_vehicle(current_type):
+            if self._session_id is not None:
+                db.set_session_vehicle(
+                    self._session_id, self.latest["indicators"].get("army"), current_type,
+                )
+            self._session_vehicle_set = True
         # Close out the interval for the vehicle we're leaving, and remember it
         # as the previous vehicle (with the switch time) for air-warning
         # respawn matching.
