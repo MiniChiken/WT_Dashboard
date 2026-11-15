@@ -103,7 +103,16 @@ PASSIVE_MARKER_RE = re.compile(r"\bhas been\s*$", re.IGNORECASE)
 # all) are harmless either way.
 CRASHED_RE = re.compile(r"\bcrashed\b", re.IGNORECASE)
 
-NATION_CODES = {"ussr", "us", "usa", "germany", "britain", "uk", "japan", "china", "italy", "france", "sweden", "israel"}
+NATION_CODES = _VEHICLE_ID_NATION_PREFIXES
+
+# Exact internal-ID/display-name pairs, also used by the frontend. Some
+# vehicles cannot be matched by removing punctuation and nation prefixes.
+try:
+    VEHICLE_NAMES = json.loads(
+        (_VEHICLES_JSON_PATH.parent / "vehicle_names.json").read_text(encoding="utf-8")
+    )
+except (OSError, ValueError):
+    VEHICLE_NAMES = {}
 
 
 def _split_name_and_vehicle(segment):
@@ -207,10 +216,19 @@ def normalize_vehicle_id(type_str):
     if not type_str:
         return ""
     after_slash = type_str.split("/")[-1]
+    if not is_real_vehicle(type_str):
+        return ""
+    if after_slash in VEHICLE_NAMES:
+        return normalize_vehicle_name(VEHICLE_NAMES[after_slash])
     parts = [p for p in after_slash.split("_") if p]
     if len(parts) > 1 and parts[0].lower() in NATION_CODES:
         parts = parts[1:]
     return normalize_vehicle_name("".join(parts))
+
+
+def is_real_vehicle(type_str):
+    """The spawn-screen dummy is not a vehicle driven by the player."""
+    return bool(type_str and normalize_vehicle_name(type_str.split("/")[-1]) != "DUMMYPLANE")
 
 
 def is_air_vehicle(vehicle_name, known_armies=None):

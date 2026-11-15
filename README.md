@@ -30,6 +30,18 @@ python -m uvicorn main:app --app-dir backend --port 8765
 
 Then open `http://localhost:8765`.
 
+Battle titles use the first real vehicle selected, ignoring the spawn-screen
+`dummy_plane`. Exact ID/display-name aliases in `frontend/vehicle_names.json`
+support readable titles and player identification from the combat log. Other
+vehicles use nation-prefix and punctuation normalization; identity remains
+unresolved when the recorded evidence is ambiguous.
+
+To run the regression tests from the repository root:
+
+```sh
+PYTHONPATH=backend python -m unittest discover -s tests -v
+```
+
 ## Building the exe yourself
 
 ```
